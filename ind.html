@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Python Bug Analyzer</title>
+    <style>
+        body { font-family: sans-serif; background: #121212; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; min-height: 100vh; margin: 0; }
+        .main-container { width: 95%; max-width: 1200px; }
+        .top-row { display: flex; gap: 15px; width: 100%; height: 50vh; margin-top: 10px; }
+        .bottom-row { display: flex; gap: 15px; width: 100%; margin-top: 15px; }
+        textarea {
+            flex: 1;
+            background: #1e1e1e;
+            color: #00ff00;
+            border: 1px solid #444;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            border-radius: 8px;
+            font-size: 14px;
+            outline: none;
+            transition: border 0.3s;
+            resize: none;
+        }
+        textarea:focus { border-color: #007acc; }
+        input {
+            width: 100%;
+            background: #1e1e1e;
+            color: white;
+            border: 1px solid #444;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            margin-top: 10px;
+            box-sizing: border-box;
+        }
+        button {
+            margin-top: 25px;
+            padding: 15px 30px;
+            background: #007acc;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 18px;
+            font-weight: bold;
+            transition: background 0.3s, transform 0.1s;
+            margin-right: 10px;
+        }
+        button:hover { background: #005fa3; }
+        button:active { transform: scale(0.98); }
+        button:disabled { background: #444; cursor: not-allowed; opacity: 0.7; }
+        h1 { color: #007acc; margin-bottom: 5px; font-size: 2.2rem; }
+        p { color: #888; margin-bottom: 10px; }
+        .status-tag { font-size: 13px; color: #bbb; margin-top: 10px; white-space: pre-wrap; text-align: center; }
+        .info-box {
+            flex: 1;
+            min-height: 180px;
+            background: #1e1e1e;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        .info-box h3 {
+            margin-top: 0;
+            color: #00bfff;
+        }
+        .info-content {
+            white-space: pre-wrap;
+            color: #f1f1f1;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>AI Python Bug Analyzer</h1>
+    <p>Powered by Qwen2.5-Coder (Unsloth) & Google Colab GPU</p>
+
+    <div class="main-container">
+        <input id="apiUrl" placeholder="Paste your Ngrok /analyze_fix URL here, e.g. https://xxxx.ngrok-free.app/analyze_fix" />
+
+        <div class="top-row">
+            <textarea id="input" placeholder="Paste your buggy Python code here..."></textarea>
+            <textarea id="output" placeholder="AI's fixed code will appear here..." readonly></textarea>
+        </div>
+
+        <div class="bottom-row">
+            <div class="info-box">
+                <h3>Buggy Lines</h3>
+                <div id="buggyLinesBox" class="info-content">No analysis yet.</div>
+            </div>
+
+            <div class="info-box">
+                <h3>Detected Bug Types</h3>
+                <div id="bugTypesBox" class="info-content">No analysis yet.</div>
+            </div>
+        </div>
+
+        <div>
+            <button onclick="testConnection()" id="testBtn">Test Connection</button>
+            <button onclick="fixCode()" id="btn">Analyze & Fix Code ✨</button>
+        </div>
+
+        <div class="status-tag" id="status-text">Ready to analyze</div>
+    </div>
+
+    <script>
+        const REQUEST_TIMEOUT = 180000;
+        const STORAGE_KEY = "bug_analyzer_api_url";
+
+        function setStatus(msg) {
+            document.getElementById('status-text').innerText = msg;
+        }
+
+        function normalizeUrl(url) {
+            url = url.trim();
+            if (!url) return "";
+            return url.endsWith('/analyze_fix') ? url : url.replace(/\/+$/, '') + '/analyze_fix';
+        }
+
+        function saveUrl() {
+            const input = document.getElementById('apiUrl');
+            const url = normalizeUrl(input.value);
+            input.value = url;
+            localStorage.setItem(STORAGE_KEY, url);
+            return url;
+        }
+
+        function loadUrl() {
+            const saved = localStorage.getItem(STORAGE_KEY);
+            if (saved) document.getElementById('apiUrl').value = saved;
+        }
+
+        function cleanOutput(text) {
+            if (!text) return "";
+            text = String(text).trim();
+            text = text.replace(/<\|im_start\|>assistant/gi, "");
+            text = text.replace(/<\|im_end\|>/gi, "");
+            text = text.replace(/^assistant[:\s]*/i, "");
+            const match = text.match(/```(?:\w+)?\n?([\s\S]*?)```/);
+            if (match) text = match[1];
+            return text.trim();
+        }
+
+        async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT) {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeout);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } finally {
+                clearTimeout(id);
+            }
+        }
+
+        async function testConnection() {
+            const url = saveUrl();
+            if (!url) {
+                setStatus("Please paste the Ngrok /analyze_fix URL first.");
+                return;
+            }
+
+            const healthUrl = url.replace(/\/analyze_fix$/, "/health");
+
+            try {
+                setStatus("Testing connection to Colab...");
+                const response = await fetchWithTimeout(healthUrl, {
+                    method: 'GET',
+                    headers: {
+                        'ngrok-skip-browser-warning': 'true'
+                    }
+                }, 15000);
+
+                if (!response.ok) {
+                    throw new Error("Health check failed with status " + response.status);
+                }
+
+                const data = await response.json();
+                if (data.status !== "ok") {
+                    throw new Error("Invalid health response");
+                }
+
+                setStatus("Connection successful. Colab server is alive.");
+            } catch (error) {
+                if (error.name === "AbortError") {
+                    setStatus("Connection timed out. Colab or Ngrok may be sleeping.");
+                } else {
+                    setStatus("Connection failed: " + error.message);
+                }
+            }
+        }
+
+        async function fixCode() {
+            const btn = document.getElementById('btn');
+            const testBtn = document.getElementById('testBtn');
+            const inputVal = document.getElementById('input').value.trim();
+            const outputBox = document.getElementById('output');
+            const buggyLinesBox = document.getElementById('buggyLinesBox');
+            const bugTypesBox = document.getElementById('bugTypesBox');
+            const url = saveUrl();
+
+            if (!url) {
+                setStatus("Please paste the Ngrok /analyze_fix URL first.");
+                return;
+            }
+
+            if (!inputVal) {
+                alert("Please paste some code first!");
+                return;
+            }
+
+            btn.innerText = "AI is Analyzing...";
+            btn.disabled = true;
+            testBtn.disabled = true;
+            setStatus("Sending request to Colab...");
+            outputBox.value = "Analyzing your code and generating a fix...";
+            buggyLinesBox.innerText = "Analyzing buggy lines...";
+            bugTypesBox.innerText = "Analyzing bug types...";
+
+            try {
+                const response = await fetchWithTimeout(url, {
+                    method: 'POST',
+                    mode: 'cors',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'ngrok-skip-browser-warning': 'true'
+                    },
+                    body: JSON.stringify({ code: inputVal })
+                });
+
+                const rawText = await response.text();
+                let data;
+
+                try {
+                    data = JSON.parse(rawText);
+                } catch {
+                    throw new Error("Server did not return valid JSON. Raw response: " + rawText.slice(0, 300));
+                }
+
+                if (!response.ok) {
+                    throw new Error(data.error || ("Server status: " + response.status));
+                }
+
+                const fixed = cleanOutput(data.fixed_code);
+                if (!fixed) {
+                    throw new Error("Model returned empty output");
+                }
+
+                outputBox.value = fixed;
+
+                const hasBug = Boolean(data.has_bug);
+                const buggyLines = Array.isArray(data.buggy_lines) ? data.buggy_lines : [];
+                const detectedBugs = Array.isArray(data.detected_bugs) ? data.detected_bugs : [];
+
+                if (hasBug) {
+                    buggyLinesBox.innerText = buggyLines.length ? buggyLines.join("\n") : "Bug detected, but no specific lines were returned.";
+                    bugTypesBox.innerText = detectedBugs.length ? detectedBugs.join("\n") : "Bug detected, but no specific categories were returned.";
+                    setStatus("Bug analysis and code fix completed successfully.");
+                } else {
+                    buggyLinesBox.innerText = "No buggy lines found.";
+                    bugTypesBox.innerText = "No bug detected.";
+                    setStatus("Code appears clean. No bug detected.");
+                }
+            } catch (error) {
+                console.error("Fetch Error:", error);
+                outputBox.value = error.name === "AbortError"
+                    ? "Request timed out. The model took too long."
+                    : "Error: " + error.message;
+
+                buggyLinesBox.innerText = "Analysis failed.";
+                bugTypesBox.innerText = "Analysis failed.";
+
+                setStatus(
+                    error.name === "AbortError"
+                        ? "Timeout: model response took too long."
+                        : "AI Failed: " + error.message
+                );
+            } finally {
+                btn.innerText = "Analyze & Fix Code ✨";
+                btn.disabled = false;
+                testBtn.disabled = false;
+            }
+        }
+
+        loadUrl();
+    </script>
+</body>
+</html>
